@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-proxy
+  namespace: devops-demo
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: nginx-proxy
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

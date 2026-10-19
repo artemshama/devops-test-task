@@ -1,0 +1,16 @@
+{
+  "name": "devops-test-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ExpressJS Hello World application for a DevOps test task",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "express": "^5.3.0"
+  }
+}

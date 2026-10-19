@@ -1,0 +1,207 @@
+---
+- name: Configure Nginx server and SSH access
+  hosts: nginx_hosts
+  become: true
+  gather_facts: true
+
+  vars:
+    nginx_site_root: /var/www/my-nginx
+    nginx_site_config: /etc/nginx/conf.d/my-nginx.conf
+    nginx_key_url: https://nginx.org/keys/nginx_signing.key
+    nginx_key_file: /tmp/nginx_signing.key
+    nginx_keyring: /usr/share/keyrings/nginx-archive-keyring.gpg
+    nginx_key_fingerprint: "573BFD6B3D8FBC641079A6ABABF5BD827BD9BF62"
+    carxadmin_user: carxadmin
+
+  pre_tasks:
+    - name: Verify target operating system
+      ansible.builtin.assert:
+        that:
+          - ansible_facts["distribution"] == "Ubuntu"
+          - ansible_facts["distribution_release"] == "noble"
+        fail_msg: "This playbook currently targets Ubuntu 24.04 only."
+
+    - name: Verify required password hash is configured
+      ansible.builtin.assert:
+        that:
+          - carxadmin_password_hash is defined
+          - carxadmin_password_hash | length > 20
+        fail_msg: >-
+          Configure carxadmin_password_hash using Ansible Vault
+          before running this playbook.
+
+  tasks:
+    - name: Upgrade all installed OS packages
+      ansible.builtin.apt:
+        update_cache: true
+        upgrade: dist
+        cache_valid_time: 3600
+
+    - name: Install required system packages
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - openssh-server
+        state: present
+        update_cache: true
+
+    - name: Ensure APT keyring directory exists
+      ansible.builtin.file:
+        path: /usr/share/keyrings
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Download official Nginx signing key
+      ansible.builtin.get_url:
+        url: "{{ nginx_key_url }}"
+        dest: "{{ nginx_key_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Inspect Nginx signing key
+      ansible.builtin.command:
+        argv:
+          - gpg
+          - --show-keys
+          - --with-colons
+          - "{{ nginx_key_file }}"
+      register: nginx_key_info
+      changed_when: false
+
+    - name: Verify official Nginx signing key fingerprint
+      ansible.builtin.assert:
+        that:
+          - nginx_key_fingerprint in nginx_key_info.stdout
+        fail_msg: "The Nginx signing key fingerprint is unexpected."
+
+    - name: Convert Nginx signing key to APT keyring
+      ansible.builtin.command:
+        argv:
+          - gpg
+          - --dearmor
+          - --yes
+          - --output
+          - "{{ nginx_keyring }}"
+          - "{{ nginx_key_file }}"
+        creates: "{{ nginx_keyring }}"
+
+    - name: Set readable permissions on Nginx keyring
+      ansible.builtin.file:
+        path: "{{ nginx_keyring }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Configure official Nginx stable repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/nginx.list
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          deb [arch=amd64,arm64 signed-by={{ nginx_keyring }}] https://nginx.org/packages/ubuntu {{ ansible_facts["distribution_release"] }} nginx
+
+    - name: Prefer packages from the official Nginx repository
+      ansible.builtin.copy:
+        dest: /etc/apt/preferences.d/99nginx
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          Package: nginx nginx-*
+          Pin: origin nginx.org
+          Pin-Priority: 900
+
+    - name: Refresh APT cache after configuring Nginx repository
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Install Nginx web server
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+
+    - name: Create website document root
+      ansible.builtin.file:
+        path: "{{ nginx_site_root }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install required HTML page
+      ansible.builtin.copy:
+        src: files/index.html
+        dest: "{{ nginx_site_root }}/index.html"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Deploy Nginx site configuration
+      ansible.builtin.template:
+        src: templates/nginx-site.conf.j2
+        dest: "{{ nginx_site_config }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Validate and reload Nginx
+
+    - name: Remove default Nginx virtual host
+      ansible.builtin.file:
+        path: /etc/nginx/conf.d/default.conf
+        state: absent
+      notify: Validate and reload Nginx
+
+    - name: Ensure Nginx is enabled and started
+      ansible.builtin.service:
+        name: nginx
+        enabled: true
+        state: started
+
+    - name: Create carxadmin account
+      ansible.builtin.user:
+        name: "{{ carxadmin_user }}"
+        password: "{{ carxadmin_password_hash }}"
+        shell: /bin/bash
+        create_home: true
+        state: present
+
+    - name: Install SSH public key for carxadmin
+      ansible.posix.authorized_key:
+        user: "{{ carxadmin_user }}"
+        state: present
+        key: "{{ lookup('file', lookup('env', 'HOME') + '/.ssh/id_ed25519_carxadmin.pub') }}"
+        manage_dir: true
+
+    - name: Configure SSH public-key authentication and prohibit root login
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/00-devops-test.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          PubkeyAuthentication yes
+          PermitRootLogin no
+      notify: Validate and restart SSH
+
+    - name: Ensure SSH service is enabled and started
+      ansible.builtin.service:
+        name: ssh
+        enabled: true
+        state: started
+
+  handlers:
+    - name: Validate and reload Nginx
+      ansible.builtin.shell:
+        cmd: nginx -t && systemctl reload nginx
+      changed_when: true
+
+    - name: Validate and restart SSH
+      ansible.builtin.shell:
+        cmd: sshd -t && systemctl restart ssh
+      changed_when: true
